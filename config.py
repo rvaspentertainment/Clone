@@ -2,9 +2,9 @@ import os
 from typing import List
 
 # Telegram Bot Configuration
-API_ID: int = int(os.getenv("API_ID", "0"))
-API_HASH: str = os.getenv("API_HASH", "")
-BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
+API_ID: int = int(os.getenv("API_ID", "13828860)
+API_HASH: str = os.getenv("API_HASH", "bbcd5f94dcd9f8a5eedc5de7397b4127")
+BOT_TOKEN: str = os.getenv("BOT_TOKEN", "7419820448:AAHQLtA814ta5kXQduBopHC6oxBTHka2FJQ")
 
 # Admin User IDs (comma-separated in env)
 ADMIN_IDS: List[int] = [
