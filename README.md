@@ -63,10 +63,12 @@ Before deploying, you need:
 4. **Deploy Settings**:
    - **Instance Type**: Free (Nano)
    - **Region**: Choose closest to you
-   - **Port**: Leave default
+   - **Builder**: Dockerfile
+   - **Port**: Leave default (or set to 8000)
+   - **Run Command**: `python bot.py` (or leave empty, Procfile will handle it)
    - **Health Check**: Disabled
 
-5. **Click "Deploy"** and wait for deployment to complete
+5. **Click "Deploy"** and wait for deployment to complete (2-5 minutes)
 
 ### Method 2: Local Testing
 
@@ -108,9 +110,39 @@ Available commands:
 
 - `/list` - Show all running bots
 - `/stop <bot_id>` - Stop a specific bot
-- `/restart <bot_id>` - Restart a bot
+- `/restart <bot_id>` - Restart a bot (keeps same code)
+- `/update <bot_id>` - **Pull latest changes from GitHub and restart**
 - `/logs <bot_id>` - View recent logs
 - `/status` - Check system resources
+
+### Step 4: Update Deployed Bots
+
+When you edit your deployed bot's code on GitHub:
+
+**Option 1: Manual Update (Recommended)**
+1. Push changes to GitHub
+2. Send `/update <bot_id>` to Manager Bot
+3. Bot will:
+   - Pull latest code (`git pull`)
+   - Reinstall requirements if changed
+   - Restart with new code
+   - Notify you of changes
+
+**Option 2: Auto-Update (Experimental)**
+Enable automatic update checking:
+```
+/autoupdate on        # Check every 5 minutes
+/autoupdate on 10     # Check every 10 minutes
+/autoupdate off       # Disable auto-update
+```
+
+**How it works:**
+- Manager Bot checks GitHub every N minutes
+- If changes detected, automatically pulls and restarts
+- No manual intervention needed
+- Good for continuous deployment
+
+**Note:** Auto-update uses system resources. Recommended interval: 5-10 minutes.
 
 ## 🔐 GitHub Personal Access Token
 
@@ -124,65 +156,83 @@ For **private repositories**, you need a GitHub token:
 
 ## 📝 Bot Repository Requirements
 
-Your bot repository must have:
+Your bot repository can have any of these startup methods (checked in order):
 
-1. **Main file** named one of:
+### ✅ Supported Startup Methods:
+
+1. **Shell Scripts** (priority):
+   - `start.sh`
+   - `run.sh`
+   - `startup.sh`
+
+2. **Python Files**:
    - `bot.py`
    - `main.py`
    - `app.py`
    - `__main__.py`
+   - `run.py`
 
-2. **requirements.txt** (optional but recommended)
+3. **Python Package**:
+   - `__init__.py` (runs as module)
 
-3. **Environment variable support**:
-   - Your bot should read `BOT_TOKEN` from environment:
-   ```python
-   import os
-   BOT_TOKEN = os.getenv("BOT_TOKEN")
+4. **Procfile** (Heroku-style):
+   ```
+   worker: python bot.py
+   bot: python main.py
    ```
 
-### Example Bot Structure
+5. **Auto-detection**:
+   - Searches subdirectories for files with "bot" or "main" in name
+
+### 🤖 Works with Popular Bot Types:
+
+✅ **Autofilter Bots** (TG-File-Store, Autofilter-V3, etc.)
+✅ **Music Bots** (VCPlayerBot, MusicBot, etc.)
+✅ **Mirror Bots** (Telegram-Mirror-Bot, etc.)
+✅ **Custom Bots** (any structure)
+
+### 📁 Example Bot Structure (Autofilter):
 
 ```
-my-bot/
+autofilter-bot/
 ├── bot.py              # Main bot file
+├── database/           # Database module
+├── plugins/            # Plugin files
 ├── requirements.txt    # Dependencies
-└── config.py          # Optional config
+├── config.py          # Configuration
+└── start.sh           # Optional startup script
 ```
 
-**bot.py example:**
+**Environment Variable Support:**
+
+Your bot should read `BOT_TOKEN` from environment:
 ```python
 import os
-from pyrogram import Client, filters
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-
-app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    await message.reply("Hello! I'm running on Koyeb!")
-
-app.run()
 ```
+
+For autofilter bots with multiple env vars, you can also pass them during deployment (coming soon) or hardcode non-sensitive ones.
 
 ## 🛠️ Troubleshooting
 
 ### Bot fails to deploy
 
-**Error: "No main bot file found"**
-- Ensure your repo has `bot.py`, `main.py`, or `app.py`
+**Error: "No valid startup file found"**
+- Ensure your repo has one of: `bot.py`, `main.py`, `start.sh`, `Procfile`, or Python package structure
+- For autofilter bots, make sure the main bot file exists
+- Check if the bot requires specific environment variables
 
 **Error: "Requirements installation failed"**
 - Check your `requirements.txt` for invalid packages
 - Ensure all packages are available on PyPI
+- Some packages may require system dependencies
 
 **Error: "Bot process died immediately"**
 - Check bot logs with `/logs <bot_id>`
 - Verify bot token is correct
-- Ensure bot code has no syntax errors
+- Ensure all required environment variables are set
+- Check for syntax errors in bot code
+- Verify database connections (if bot uses database)
 
 ### Bot stops running
 
@@ -192,9 +242,21 @@ app.run()
 
 ### Koyeb deployment issues
 
+**Error: "no command to run your application"**
+- Make sure `Procfile` is in your repository
+- Or set Run Command in Koyeb: `python bot.py`
+- Ensure Dockerfile is present
+
+**Error: "Application exited with code 1"**
+- Check if all environment variables are set correctly
+- Verify BOT_TOKEN, API_ID, API_HASH, ADMIN_IDS are all set
+- Check Koyeb logs for specific error messages
+- Make sure the bot token is valid
+
 - Verify all environment variables are set correctly
 - Ensure your Manager Bot token is valid
 - Check Koyeb logs in the dashboard
+- Try redeploying the service
 
 ## ⚠️ Important Notes
 
@@ -220,7 +282,23 @@ If you update the manager bot code:
 
 - **RAM**: 512MB minimum (free tier provides 512MB)
 - **CPU**: 0.1 vCPU (free tier sufficient)
-- **Storage**: Temporary (ephemeral)
+- **Storage**: Ephemeral (temporary, but bots auto-restore on restart)
+
+## 💾 Data Persistence
+
+The bot uses **JSON file storage** (`bots_data.json`) to save:
+- Bot tokens
+- GitHub repository URLs
+- Bot directories
+- Deployment timestamps
+
+**Benefits:**
+- ✅ Auto-restart bots after Manager Bot restart
+- ✅ No MongoDB needed
+- ✅ Simple and lightweight
+- ✅ Works on Koyeb free tier
+
+**Note:** Koyeb free tier uses ephemeral storage. If the instance is fully recreated, you'll need to redeploy bots. But normal restarts preserve bot data.
 
 ## 🤝 Contributing
 
