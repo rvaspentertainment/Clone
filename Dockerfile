@@ -21,6 +21,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application files
 COPY . .
 
+# Make start script executable
+RUN chmod +x start.sh
+
 # Create directory for deployed bots
 RUN mkdir -p /app/deployed_bots
 
