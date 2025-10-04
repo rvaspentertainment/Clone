@@ -42,6 +42,8 @@ Welcome! This bot allows you to run multiple Telegram bots from GitHub repositor
 • /list - Show all running bots
 • /stop <bot_id> - Stop a bot
 • /restart <bot_id> - Restart a bot
+• /update <bot_id> - Update bot from GitHub
+• /autoupdate <on|off> - Enable/disable auto-updates
 • /logs <bot_id> - View bot logs
 • /status - System status
 
@@ -138,6 +140,27 @@ async def restart_command(client, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ Error restarting bot: {str(e)}")
 
+@app.on_message(filters.command("update"))
+@admin_only
+async def update_command(client, message: Message):
+    try:
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await message.reply_text("❌ Usage: /update <bot_id>\n\nThis will pull latest changes from GitHub and restart the bot.")
+            return
+        
+        bot_id = args[1].strip()
+        status_msg = await message.reply_text(f"🔄 Updating bot `{bot_id}` from GitHub...\n\nPlease wait...")
+        
+        success, msg = await bot_manager.update_bot(bot_id)
+        
+        if success:
+            await status_msg.edit_text(f"✅ {msg}")
+        else:
+            await status_msg.edit_text(f"❌ {msg}")
+    except Exception as e:
+        await message.reply_text(f"❌ Error updating bot: {str(e)}")
+
 @app.on_message(filters.command("logs"))
 @admin_only
 async def logs_command(client, message: Message):
@@ -164,6 +187,53 @@ async def logs_command(client, message: Message):
             await message.reply_text(f"📄 **Logs for bot `{bot_id}`:**\n\n```\n{logs}\n```")
     except Exception as e:
         await message.reply_text(f"❌ Error fetching logs: {str(e)}")
+
+@app.on_message(filters.command("autoupdate"))
+@admin_only
+async def autoupdate_command(client, message: Message):
+    try:
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await message.reply_text("❌ Usage: /autoupdate <on|off> [interval_minutes]\n\nExample:\n• /autoupdate on - Enable with 5 min interval\n• /autoupdate on 10 - Enable with 10 min interval\n• /autoupdate off - Disable")
+            return
+        
+        action = args[1].lower().strip()
+        
+        if action == "on" or action.startswith("on "):
+            # Parse interval if provided
+            parts = args[1].split()
+            interval = 5  # default
+            
+            if len(parts) > 1:
+                try:
+                    interval = int(parts[1])
+                    if interval < 1:
+                        await message.reply_text("❌ Interval must be at least 1 minute")
+                        return
+                except ValueError:
+                    await message.reply_text("❌ Invalid interval. Use a number (minutes)")
+                    return
+            
+            success, msg = bot_manager.enable_auto_update(interval)
+            
+            if success:
+                await message.reply_text(f"✅ {msg}\n\n📝 All bots will be checked for updates every {interval} minutes and auto-updated if changes are found.")
+            else:
+                await message.reply_text(f"❌ {msg}")
+        
+        elif action == "off":
+            success, msg = bot_manager.disable_auto_update()
+            
+            if success:
+                await message.reply_text(f"✅ {msg}")
+            else:
+                await message.reply_text(f"ℹ️ {msg}")
+        
+        else:
+            await message.reply_text("❌ Invalid action. Use 'on' or 'off'")
+    
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {str(e)}")
 
 @app.on_message(filters.command("status"))
 @admin_only
