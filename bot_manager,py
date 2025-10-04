@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, Tuple, Optional
 import logging
+from storage import Storage
 
 # Setup logging
 logging.basicConfig(
@@ -19,6 +20,10 @@ class BotManager:
         self.bots: Dict[str, dict] = {}
         self.deployment_states: Dict[int, dict] = {}
         self.base_dir = os.path.join(os.getcwd(), "deployed_bots")
+        self.storage = Storage()
+        self.auto_update_task = None
+        self.auto_update_enabled = False
+        self.auto_update_interval = 300  # 5 minutes
         
         # Create base directory for deployed bots
         try:
@@ -26,6 +31,57 @@ class BotManager:
             logger.info(f"Base directory created/verified: {self.base_dir}")
         except Exception as e:
             logger.error(f"Error creating base directory: {str(e)}")
+        
+        # Auto-restart saved bots on startup
+        asyncio.create_task(self._restore_bots())
+    
+    async def _restore_bots(self):
+        """Restore previously deployed bots from storage"""
+        try:
+            await asyncio.sleep(5)  # Wait for bot to fully initialize
+            saved_bots = self.storage.get_all_bots()
+            
+            if not saved_bots:
+                logger.info("No bots to restore")
+                return
+            
+            logger.info(f"Restoring {len(saved_bots)} bots from storage...")
+            
+            for bot_id, bot_info in saved_bots.items():
+                try:
+                    # Check if bot directory still exists
+                    if not os.path.exists(bot_info["bot_dir"]):
+                        logger.warning(f"Bot {bot_id} directory not found, skipping")
+                        continue
+                    
+                    # Try to restart the bot
+                    success, msg, process = await self._start_bot_process(
+                        bot_id,
+                        bot_info["bot_dir"],
+                        bot_info["bot_token"]
+                    )
+                    
+                    if success:
+                        self.bots[bot_id] = {
+                            "process": process,
+                            "bot_token": bot_info["bot_token"],
+                            "repo_url": bot_info["repo_url"],
+                            "bot_dir": bot_info["bot_dir"],
+                            "status": "running",
+                            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "log_file": bot_info["log_file"]
+                        }
+                        logger.info(f"Bot {bot_id} restored successfully")
+                    else:
+                        logger.error(f"Failed to restore bot {bot_id}: {msg}")
+                
+                except Exception as e:
+                    logger.error(f"Error restoring bot {bot_id}: {str(e)}")
+            
+            logger.info("Bot restoration complete")
+        
+        except Exception as e:
+            logger.error(f"Error in bot restoration: {str(e)}")
     
     async def deploy_bot(self, bot_token: str, repo_url: str, github_token: Optional[str] = None) -> Tuple[bool, str, Optional[str]]:
         """Deploy a new bot from GitHub repository"""
@@ -60,6 +116,9 @@ class BotManager:
                 "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "log_file": os.path.join(bot_dir, f"{bot_id}.log")
             }
+            
+            # Save to storage
+            self.storage.save_bot(bot_id, self.bots[bot_id])
             
             logger.info(f"Bot {bot_id} deployed successfully")
             return True, "Bot deployed successfully!", bot_id
@@ -288,6 +347,9 @@ class BotManager:
             bot_info["status"] = "stopped"
             logger.info(f"Bot {bot_id} stopped successfully")
             
+            # Remove from storage
+            self.storage.remove_bot(bot_id)
+            
             return True, f"Bot {bot_id} stopped successfully"
         
         except Exception as e:
@@ -331,6 +393,57 @@ class BotManager:
             logger.error(f"Error restarting bot {bot_id}: {str(e)}")
             return False, f"Error restarting bot: {str(e)}"
     
+    async def update_bot(self, bot_id: str) -> Tuple[bool, str]:
+        """Update bot from GitHub (git pull) and restart"""
+        try:
+            if bot_id not in self.bots:
+                return False, f"Bot {bot_id} not found"
+            
+            logger.info(f"Updating bot {bot_id} from GitHub")
+            
+            bot_info = self.bots[bot_id]
+            bot_dir = bot_info["bot_dir"]
+            
+            # Git pull latest changes
+            process = await asyncio.create_subprocess_exec(
+                "git", "-C", bot_dir, "pull",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                logger.error(f"Git pull failed: {error_msg}")
+                return False, f"Git pull failed: {error_msg}"
+            
+            output = stdout.decode()
+            
+            # Check if there were any updates
+            if "Already up to date" in output or "Already up-to-date" in output:
+                logger.info(f"Bot {bot_id} is already up to date")
+                return True, f"Bot {bot_id} is already up to date. No restart needed."
+            
+            # Reinstall requirements in case they changed
+            success, msg = await self._install_requirements(bot_dir)
+            if not success:
+                logger.warning(f"Requirements update failed: {msg}")
+                # Continue anyway, old requirements might still work
+            
+            # Restart the bot to apply changes
+            success, msg = await self.restart_bot(bot_id)
+            
+            if success:
+                logger.info(f"Bot {bot_id} updated and restarted successfully")
+                return True, f"Bot {bot_id} updated successfully! Changes:\n{output}"
+            else:
+                return False, f"Bot updated but restart failed: {msg}"
+        
+        except Exception as e:
+            logger.error(f"Error updating bot {bot_id}: {str(e)}")
+            return False, f"Error updating bot: {str(e)}"
+    
     def list_bots(self) -> Dict[str, dict]:
         """List all deployed bots"""
         try:
@@ -366,3 +479,81 @@ class BotManager:
         except Exception as e:
             logger.error(f"Error reading logs for bot {bot_id}: {str(e)}")
             return f"Error reading logs: {str(e)}"
+    
+    async def _auto_update_checker(self):
+        """Background task to check for updates"""
+        logger.info("Auto-update checker started")
+        
+        while self.auto_update_enabled:
+            try:
+                await asyncio.sleep(self.auto_update_interval)
+                
+                logger.info("Checking for bot updates...")
+                
+                for bot_id in list(self.bots.keys()):
+                    try:
+                        bot_info = self.bots[bot_id]
+                        
+                        if bot_info["status"] != "running":
+                            continue
+                        
+                        bot_dir = bot_info["bot_dir"]
+                        
+                        # Check if there are updates
+                        process = await asyncio.create_subprocess_exec(
+                            "git", "-C", bot_dir, "fetch",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        await process.communicate()
+                        
+                        # Check if local is behind remote
+                        process = await asyncio.create_subprocess_exec(
+                            "git", "-C", bot_dir, "status", "-uno",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        stdout, _ = await process.communicate()
+                        output = stdout.decode()
+                        
+                        if "Your branch is behind" in output:
+                            logger.info(f"Updates available for bot {bot_id}, updating...")
+                            success, msg = await self.update_bot(bot_id)
+                            
+                            if success:
+                                logger.info(f"Bot {bot_id} auto-updated successfully")
+                            else:
+                                logger.error(f"Auto-update failed for bot {bot_id}: {msg}")
+                    
+                    except Exception as e:
+                        logger.error(f"Error checking updates for bot {bot_id}: {str(e)}")
+                        continue
+            
+            except Exception as e:
+                logger.error(f"Error in auto-update checker: {str(e)}")
+                await asyncio.sleep(60)
+    
+    def enable_auto_update(self, interval_minutes: int = 5):
+        """Enable auto-update checker"""
+        if self.auto_update_enabled:
+            return False, "Auto-update is already enabled"
+        
+        self.auto_update_interval = interval_minutes * 60
+        self.auto_update_enabled = True
+        self.auto_update_task = asyncio.create_task(self._auto_update_checker())
+        
+        logger.info(f"Auto-update enabled with {interval_minutes} minute interval")
+        return True, f"Auto-update enabled! Checking every {interval_minutes} minutes"
+    
+    def disable_auto_update(self):
+        """Disable auto-update checker"""
+        if not self.auto_update_enabled:
+            return False, "Auto-update is not enabled"
+        
+        self.auto_update_enabled = False
+        
+        if self.auto_update_task:
+            self.auto_update_task.cancel()
+        
+        logger.info("Auto-update disabled")
+        return True, "Auto-update disabled"
